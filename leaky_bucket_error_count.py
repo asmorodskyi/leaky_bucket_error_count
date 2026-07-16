@@ -1,7 +1,6 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 
 import threading
-from threading import Timer
 from collections import defaultdict
 import time
 import logging
@@ -13,7 +12,7 @@ references:
 """
 
 
-class LeakingErrorCounter():
+class LeakingErrorCounter:
     """A leaky bucket type of exception counter
 
     @param decay_rate decay rate of errors in Hz, e.g. 2 means after 0.5
@@ -34,13 +33,13 @@ class LeakingErrorCounter():
     would be if the user of the program is not interested in program bugs but
     it works Good Enough (tm) in most cases.
     """
-    def __init__(self, decay_rate=2, error_limit=10, ignore=[]):
+    def __init__(self, decay_rate=2, error_limit=10, ignore=None):
         self.errorcnt = defaultdict(int)
-        self.decay_rate  = decay_rate
+        self.decay_rate = decay_rate
         self.error_limit = error_limit
-        self.ignore = ignore
-        self.decay_thread = threading.Thread(target=self.run)
-        self.decay_thread.setDaemon(True)
+        self.ignore = tuple(ignore) if ignore else ()
+        self._lock = threading.Lock()
+        self.decay_thread = threading.Thread(target=self.run, daemon=True)
         self.decay_thread.start()
 
     def run(self):
@@ -49,27 +48,31 @@ class LeakingErrorCounter():
             self.decay()
 
     def decay(self, decrement=1):
-        for k in self.errorcnt.keys():
-            if self.errorcnt[k] > 0:
-                self.errorcnt[k] -= 1
+        with self._lock:
+            for k in list(self.errorcnt.keys()):
+                if self.errorcnt[k] > 0:
+                    self.errorcnt[k] -= decrement
 
     def handle_exception(self, e):
-        for i in self.ignore:
-            if isinstance(e, i):
-                raise(e)
+        if self.ignore and isinstance(e, self.ignore):
+            raise e
         k = str(e)
-        self.errorcnt[k] += 1
-        logging.debug("exception: %s, errorcount: %u" % (k, self.errorcnt[k]))
-        if self.errorcnt[k] > self.error_limit:
-            logging.error("error limit hit for exception %s, reraising" % k)
-            raise(e)
+        with self._lock:
+            self.errorcnt[k] += 1
+            count = self.errorcnt[k]
+        logging.debug("exception: %s, errorcount: %d", k, count)
+        if count > self.error_limit:
+            logging.error("error limit hit for exception %s, reraising", k)
+            raise e
         else:
-            #logging.exception(e)
-            logging.info("Exception %s encountered, error count increased" % e)
+            # logging.exception(e)
+            logging.info("Exception %s encountered, error count increased", e)
 
 
-def continous_run_with_leaky_error_counter(fun, instance=LeakingErrorCounter(), run_condition=True):
-    while run_condition:
+def continous_run_with_leaky_error_counter(fun, instance=None, run_condition=lambda: True):
+    if instance is None:
+        instance = LeakingErrorCounter()
+    while run_condition():
         try:
             fun()
         except Exception as e:
@@ -79,11 +82,14 @@ def continous_run_with_leaky_error_counter(fun, instance=LeakingErrorCounter(), 
 def test_fails_after_too_many_errors_in_too_short_time():
     """This test throws one of two errors until too many have been encountered of one type"""
     import random
-    def error_thrower(yield_list=[Exception("generic error"), Exception("other error")]):
+    yield_list = [Exception("generic error"), Exception("other error")]
+
+    def error_thrower():
         time.sleep(0.1)
         logging.debug("throwing_error")
-        raise yield_list[random.randint(0,1)]
+        raise random.choice(yield_list)
     continous_run_with_leaky_error_counter(error_thrower)
+
 
 if __name__ == "__main__":
     logging.root.setLevel(logging.DEBUG)
